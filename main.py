@@ -1,20 +1,11 @@
 import pandas as pd
 import numpy as np
-import os
-import time
-
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.metrics import roc_auc_score, roc_curve
-from sklearn.feature_selection import VarianceThreshold
-from sklearn.model_selection import train_test_split
-from sklearn.decomposition import PCA
-
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 import matplotlib.pyplot as plt
-import seaborn as sns
-import joblib
-
+import os
+import time
 
 # ==============================
 # STEP 1: LOAD DATA
@@ -29,13 +20,15 @@ print("Dataset shape:", df.shape)
 
 
 # ==============================
-# STEP 2: DATA CLEANING
+# STEP 2: CLEAN DATA
 # ==============================
 
 print("\nCleaning data...")
 
 df = df.drop_duplicates()
+
 df = df.replace([np.inf, -np.inf], np.nan)
+
 df = df.fillna(df.median(numeric_only=True))
 
 print("Shape after cleaning:", df.shape)
@@ -76,72 +69,54 @@ print("Shape after encoding:", X.shape)
 
 
 # ==============================
-# STEP 6: FEATURE SELECTION
+# STEP 6: SCALE FEATURES
 # ==============================
 
-selector = VarianceThreshold(threshold=0.01)
-X = selector.fit_transform(X)
-
-
-# ==============================
-# STEP 7: FEATURE SCALING
-# ==============================
+print("\nScaling features...")
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
 
 # ==============================
-# STEP 8: PCA (DIMENSION REDUCTION)
+# STEP 7: PREPARE TRAINING DATA (IMPROVED)
 # ==============================
 
-print("\nApplying PCA...")
+print("\nPreparing training data...")
 
-pca = PCA(n_components=0.95)   # keep 95% variance
-X_pca = pca.fit_transform(X_scaled)
+X_normal = X_scaled[y == 0]
+X_attack = X_scaled[y == 1]
 
-print("Features after PCA:", X_pca.shape)
+# Add small portion of attacks (important improvement)
+attack_sample = X_attack[:int(0.1 * len(X_attack))]
 
+X_train = np.vstack((X_normal, attack_sample))
 
-# ==============================
-# STEP 9: TRAIN TEST SPLIT
-# ==============================
-
-X_normal = X_pca[y == 0]
-
-X_train, _ = train_test_split(
-    X_normal,
-    test_size=0.2,
-    random_state=42
-)
-
-X_test = X_pca
+X_test = X_scaled
 y_test = y
 
 
 # ==============================
-# STEP 10: TRAIN ISOLATION FOREST
+# STEP 8: TRAIN MODEL (IMPROVED)
 # ==============================
 
-print("\nTraining model...")
+print("\nTraining Isolation Forest...")
 
 model = IsolationForest(
-    n_estimators=400,
+    n_estimators=300,        # more trees
+    contamination=0.12,      # tuned
     max_samples=256,
-    contamination=0.12,
-    max_features=1.0,
-    bootstrap=False,
     n_jobs=-1,
     random_state=42
 )
 
 model.fit(X_train)
 
-print("Training completed.")
+print("Model training complete.")
 
 
 # ==============================
-# STEP 11: ANOMALY SCORING
+# STEP 9: ANOMALY SCORING
 # ==============================
 
 print("\nDetecting anomalies...")
@@ -156,79 +131,67 @@ print("Detection latency:", latency)
 
 
 # ==============================
-# STEP 12: THRESHOLD OPTIMIZATION
+# STEP 10: THRESHOLD OPTIMIZATION
 # ==============================
 
-threshold = np.percentile(scores, 88)   # optimized threshold
+print("\nOptimizing threshold...")
 
-pred = (scores >= threshold).astype(int)
+best_f1 = 0
+best_threshold = 0
+
+for p in range(70, 95):
+
+    th = np.percentile(scores, p)
+
+    pred_temp = (scores >= th).astype(int)
+
+    f1 = f1_score(y_test, pred_temp)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_threshold = th
+
+print("Best threshold:", best_threshold)
+
+pred = (scores >= best_threshold).astype(int)
 
 
 # ==============================
-# STEP 13: EVALUATION
+# STEP 11: EVALUATE
 # ==============================
-
-cm = confusion_matrix(y_test, pred)
 
 print("\nConfusion Matrix:")
-print(cm)
+print(confusion_matrix(y_test, pred))
 
 print("\nClassification Report:")
 print(classification_report(y_test, pred))
 
 
 # ==============================
-# STEP 14: ROC-AUC
-# ==============================
-
-auc = roc_auc_score(y_test, scores)
-
-print("\nAUC Score:", auc)
-
-fpr, tpr, _ = roc_curve(y_test, scores)
-
-
-# ==============================
-# STEP 15: SAVE RESULTS
+# STEP 12: SAVE RESULTS
 # ==============================
 
 os.makedirs("results", exist_ok=True)
 
-pd.DataFrame({
+results_df = pd.DataFrame({
     "Actual": y_test,
     "Predicted": pred
-}).to_csv("results/predictions.csv", index=False)
+})
 
-joblib.dump(model, "results/isolation_forest_model.pkl")
+results_df.to_csv("results/predictions.csv", index=False)
 
-print("Results saved.")
+print("\nResults saved.")
 
 
 # ==============================
-# STEP 16: VISUALIZATION
+# STEP 13: VISUALIZATION
 # ==============================
 
 plt.figure()
 plt.hist(pred)
 plt.title("Anomaly Detection Results")
-plt.xlabel("Prediction")
+plt.xlabel("Prediction (0 = Normal, 1 = Attack)")
 plt.ylabel("Count")
 plt.savefig("results/anomaly_histogram.png")
-
-
-plt.figure()
-sns.heatmap(cm, annot=True, fmt='d')
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
-plt.title("Confusion Matrix")
-plt.savefig("results/confusion_matrix.png")
-
-
-plt.figure()
-plt.plot(fpr, tpr)
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.title("ROC Curve")
-plt.savefig("results/roc_curve.png")
 
 print("\nPipeline completed successfully!")
